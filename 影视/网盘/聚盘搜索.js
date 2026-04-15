@@ -2,7 +2,7 @@
 // @author 梦
 // @description 站点搜索 + 网盘资源解析（夸克/百度/迅雷等），支持网盘目录展开、刮削、弹幕、观看记录
 // @dependencies: axios
-// @version 1.1.2
+// @version 1.2.3
 // @downloadURL https://gh-proxy.org/https://github.com/Silent1566/OmniBox-Spider/raw/refs/heads/main/影视/网盘/聚盘搜索.js
 
 
@@ -25,7 +25,18 @@ const PANCHECK_API = text(process.env.PANCHECK_API || "");
 const PANCHECK_ENABLED = text(process.env.PANCHECK_ENABLED || (PANCHECK_API ? "1" : "0")) === "1";
 const PANCHECK_PLATFORMS = text(process.env.PANCHECK_PLATFORMS || "quark,baidu,uc,pan123,tianyi,cmcc"); // 例：quark,baidu,xunlei 或 quark;baidu;xunlei
 
+// 代理多线路配置：与盘搜分组.js 对齐
+// DRIVE_TYPE_CONFIG：命中的网盘类型才展开代理多线路，支持逗号/分号分隔
+// 例：quark;uc 或 quark,uc
+const DRIVE_TYPE_CONFIG = splitConfigList(process.env.DRIVE_TYPE_CONFIG || "quark;uc").map((s) => s.toLowerCase());
+// SOURCE_NAMES_CONFIG：多线路名称列表，支持逗号/分号分隔；web 端默认会过滤“本地代理”
+// 例：本地代理;服务端代理;直连
+const SOURCE_NAMES_CONFIG = splitConfigList(process.env.SOURCE_NAMES_CONFIG || "本地代理;服务端代理;直连");
+
 // 网盘排序配置（必须置于顶部配置区，便于统一管理）
+// DRIVE_ORDER 支持中文网盘名 / 类型码，支持逗号/分号分隔
+// 例：百度网盘,夸克网盘,迅雷网盘
+// 例：baidu;quark;xunlei
 const DRIVE_ORDER_DEFAULT = "百度网盘,天翼网盘,夸克网盘,UC网盘,115网盘,迅雷网盘,阿里网盘";
 const DRIVE_ORDER_RAW = text(process.env.DRIVE_ORDER || DRIVE_ORDER_DEFAULT);
 
@@ -369,6 +380,21 @@ function driveLabel(driveType) {
   return text(driveType); // 未知类型原样透传
 }
 
+function driveShortLabel(driveType) {
+  const d = text(driveType).toLowerCase();
+  if (!d) return "网盘";
+  if (d === "baidu") return "百度";
+  if (d === "tianyiyun") return "天翼";
+  if (d === "quark") return "夸克";
+  if (d === "uc") return "UC";
+  if (d === "115") return "115";
+  if (d === "xunlei") return "迅雷";
+  if (d === "aliyun" || d === "aliyundrive") return "阿里";
+  if (d === "cmcc") return "移动";
+  if (d === "pan123") return "123";
+  return text(driveType);
+}
+
 /**
  * 将 drive_type 字段或链接归一化为小写内部类型码（供排序使用）
  * 例：aliyundrive → aliyun；空值从 share_link 推断
@@ -420,6 +446,7 @@ function splitLinksByPanCheckPlatforms(links = []) {
 /**
  * 解析环境变量 DRIVE_ORDER → 网盘类型码数组
  * 默认顺序：百度 → 天翼 → 夸克 → UC → 115 → 迅雷 → 阿里
+ * 支持中文网盘名 / 类型码，支持逗号/分号分隔
  * 配置示例：DRIVE_ORDER=夸克网盘,百度网盘,迅雷网盘
  *           DRIVE_ORDER=quark,baidu,xunlei
  *           DRIVE_ORDER=quark;baidu;xunlei
@@ -920,7 +947,7 @@ async function detail(params, context) {
     const baseNameShareCount = new Map(); // baseName -> Set<shareURL>
     for (const prep of preparedList) {
       if (!prep) continue;
-      const driveLabelName = driveLabel(prep.driveType);
+      const driveLabelName = driveShortLabel(prep.driveType);
       const set = baseNameShareCount.get(driveLabelName) || new Set();
       set.add(prep.shareURL);
       baseNameShareCount.set(driveLabelName, set);
@@ -932,7 +959,7 @@ async function detail(params, context) {
     for (const prep of preparedList) {
       if (!prep) continue;
       const { candidate, driveType, shareURL, videoFiles, scrapeData: cScrapeData, mappingMap: cMappingMap } = prep;
-      const driveLabelName = driveLabel(driveType);
+      const driveLabelName = driveShortLabel(driveType);
 
       // 确定序号：同 baseName 有多个不同 shareURL 时才加序号
       const needIndex = (baseNameShareCount.get(driveLabelName)?.size || 0) > 1;
@@ -940,18 +967,19 @@ async function detail(params, context) {
       if (needIndex) baseNameIndexMap.set(driveLabelName, idx);
       const labelWithIdx = needIndex ? `${driveLabelName}${idx}` : driveLabelName;
 
-      // 无视频文件退化为原始链接
+      // 无视频文件时直接排除：这类候选通常是目录展开失败、分享失效或当前链路无法拿到有效视频文件
       if (!videoFiles.length) {
-        const simplePlayId = b64Encode({ mode: "raw_link", shareURL, title: primaryTitle, epName: "播放", driveType, sourceVodId: vodId });
-        playSources.push({ name: labelWithIdx, episodes: [{ name: "播放", playId: simplePlayId }] });
+        await OmniBox.log("warn", `[detail] 排除无有效视频文件候选 drive=${driveType}, url=${shareURL.substring(0, 60)}`);
         continue;
       }
 
-      // 子线路名（夸克/UC 展开多线路，序号在前缀，后缀在末尾）
-      let sourceNames = [labelWithIdx];
-      if (driveType === "quark" || driveType === "uc") {
-        sourceNames = [`${labelWithIdx}-服务端`, `${labelWithIdx}-本地`, `${labelWithIdx}-直连`];
-        if (context?.from === "web") sourceNames = sourceNames.filter((x) => !x.includes("本地"));
+      // 子线路名：与盘搜分组.js 对齐，匹配 DRIVE_TYPE_CONFIG 时才展开 SOURCE_NAMES_CONFIG
+      let sourceNames = ["直连"];
+      if (DRIVE_TYPE_CONFIG.includes(driveType)) {
+        sourceNames = [...SOURCE_NAMES_CONFIG];
+        if (context?.from === "web") {
+          sourceNames = sourceNames.filter((x) => x !== "本地代理");
+        }
       }
 
       for (const sourceName of sourceNames) {
@@ -991,7 +1019,13 @@ async function detail(params, context) {
           });
         }
         for (const ep of episodes) { delete ep._season; delete ep._episode; }
-        if (episodes.length) playSources.push({ name: sourceName, episodes });
+        if (episodes.length) {
+          let finalSourceName = labelWithIdx;
+          if (DRIVE_TYPE_CONFIG.includes(driveType)) {
+            finalSourceName = `${labelWithIdx}-${sourceName}`;
+          }
+          playSources.push({ name: finalSourceName, episodes });
+        }
       }
     }
 
@@ -1045,7 +1079,16 @@ async function play(params, context) {
       throw new Error("无效播放参数：缺少 shareURL 或 fid");
     }
 
-    const info = await OmniBox.getDriveVideoPlayInfo(shareURL, fid, flag);
+    let routeType = context?.from === "web" ? "服务端代理" : "直连";
+    if (flag) {
+      if (flag.includes("-")) {
+        const parts = flag.split("-");
+        routeType = parts[parts.length - 1];
+      } else {
+        routeType = flag;
+      }
+    }
+    const info = await OmniBox.getDriveVideoPlayInfo(shareURL, fid, routeType);
 
     const urls = [];
     if (Array.isArray(info?.url)) {
@@ -1123,7 +1166,7 @@ async function play(params, context) {
 
     return {
       urls,
-      flag: shareURL,
+      flag: routeType,
       header: info?.header || { "User-Agent": UA, "Referer": `${BASE}/` },
       parse: 0,
       danmaku: Array.isArray(danmaku) ? danmaku : []

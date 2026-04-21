@@ -690,7 +690,7 @@ async def home(params, context):
             {"type_id": cfg["type_id"], "type_name": cfg["type_name"]}
             for cfg in CATEGORY_MAP.values()
         ]
-        text = await request_text(f"{BASE_URL}/")
+        text = await request_text(f"{BASE_URL}/index.html")
         cards = extract_cards(text, CATEGORY_MAP["movie"]["type_id"], CATEGORY_MAP["movie"]["type_name"])
         if not cards:
             text = await request_text(f"{BASE_URL}/movie/")

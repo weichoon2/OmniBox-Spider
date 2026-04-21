@@ -559,6 +559,7 @@ async def collect_drive_videos(share_url: str, folder_id: str = "0", depth: int 
 
 
 CARD_RE = re.compile(r'<li\s+class="pure-g\s+shadow"[^>]*>(.*?)</li>', re.S | re.I)
+CATEGORY_DL_RE = re.compile(r'<dl\s+class="dl-horizontal"[^>]*>(.*?)</dl>', re.S | re.I)
 
 
 def extract_cards(text: str, type_id: str, type_name: str):
@@ -588,6 +589,28 @@ def extract_cards(text: str, type_id: str, type_name: str):
             "vod_pic": abs_url(img_m.group(1)) if img_m else "",
             "vod_remarks": remarks,
             "vod_content": brief,
+            "type_id": type_id,
+            "type_name": type_name,
+        })
+    return cards
+
+
+def extract_category_cards(text: str, type_id: str, type_name: str):
+    cards = []
+    for block in CATEGORY_DL_RE.findall(text):
+        href_m = re.search(r'<a[^>]+class="img-wraper"[^>]+href="([^"]+)"', block, re.I)
+        title_m = re.search(r'<dd>\s*<a[^>]*>(.*?)</a>', block, re.S | re.I)
+        img_m = re.search(r'<img[^>]+src="([^"]+)"', block, re.I)
+        href = abs_url(href_m.group(1)) if href_m else ""
+        if not href:
+            continue
+        title = normalize_vod_title(title_m.group(1) if title_m else "")
+        cards.append({
+            "vod_id": href,
+            "vod_name": title or href.rsplit("/", 1)[-1],
+            "vod_pic": abs_url(img_m.group(1)) if img_m else "",
+            "vod_remarks": "",
+            "vod_content": "",
             "type_id": type_id,
             "type_name": type_name,
         })
@@ -717,7 +740,7 @@ async def category(params, context):
         await log("info", f"[rrdynb][category] cid={category_id} page={page} filters={filters} url={url}")
         text = await request_text(url)
         cfg = CATEGORY_MAP[TYPEID_TO_KEY.get(category_id, "movie")]
-        cards = extract_cards(text, cfg["type_id"], cfg["type_name"])
+        cards = extract_category_cards(text, cfg["type_id"], cfg["type_name"])
         has_more = len(cards) > 0
         return {
             "page": page,
